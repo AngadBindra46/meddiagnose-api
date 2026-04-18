@@ -33,8 +33,45 @@ uvicorn app.main:app --reload --port 8000
 ## With Docker
 
 ```bash
-# Uses docker-compose from meddiagnose-infra repo
-docker compose up -d
+docker compose up -d   # API + Postgres + Redis
+```
+
+## Deploy to Google Cloud Run
+
+```bash
+# One-command deploy (builds, pushes, deploys)
+chmod +x deploy.sh
+./deploy.sh
+
+# Or step by step:
+gcloud run deploy meddiagnose-api \
+  --source . \
+  --dockerfile Dockerfile.prod \
+  --region us-central1 \
+  --port 8000 \
+  --memory 1Gi \
+  --cpu 2 \
+  --min-instances 1 \
+  --max-instances 10 \
+  --allow-unauthenticated
+```
+
+**Prerequisites:**
+1. `gcloud` CLI installed and authenticated (`gcloud auth login`)
+2. Artifact Registry repo: `gcloud artifacts repositories create meddiagnose --repository-format=docker --location=us-central1`
+3. Store secrets in Secret Manager:
+   ```bash
+   echo -n "postgresql+asyncpg://..." | gcloud secrets create meddiagnose-database-url --data-file=-
+   echo -n "redis://..." | gcloud secrets create meddiagnose-redis-url --data-file=-
+   echo -n "your-random-key" | gcloud secrets create meddiagnose-secret-key --data-file=-
+   ```
+
+**CI/CD:** Use `cloudbuild.yaml` with Cloud Build triggers for automatic deploys on push:
+```bash
+gcloud builds triggers create github \
+  --repo-name=meddiagnose-api --repo-owner=AngadBindra46 \
+  --branch-pattern="^main$" \
+  --build-config=cloudbuild.yaml
 ```
 
 ## API Endpoints

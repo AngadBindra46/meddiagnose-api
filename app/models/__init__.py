@@ -10,5 +10,6 @@ from app.models.fitness_log import FitnessLog, FitnessGoal
 from app.models.wearable_integration import WearableIntegration
 from app.models.health_alert import HealthAlert
 from app.models.insurance import InsurancePolicy, InsuranceBill, InsuranceClaim
+from app.models.diagnosis_feedback import DiagnosisFeedback
 
-__all__ = ["User", "Patient", "Diagnosis", "Batch", "BatchItem", "AuditLog", "SymptomLog", "ChatMessage", "HealthReport", "FitnessLog", "FitnessGoal", "WearableIntegration", "HealthAlert", "InsurancePolicy", "InsuranceBill", "InsuranceClaim"]
+__all__ = ["User", "Patient", "Diagnosis", "Batch", "BatchItem", "AuditLog", "SymptomLog", "ChatMessage", "HealthReport", "FitnessLog", "FitnessGoal", "WearableIntegration", "HealthAlert", "InsurancePolicy", "InsuranceBill", "InsuranceClaim", "DiagnosisFeedback"]

@@ -545,3 +545,176 @@ async def severity_by_gender(
             for g, counts in data.items()
         ],
     }
+
+
+# ── Feedback Analytics ─────────────────────────────────────
+
+
+@router.get("/analytics/model-accuracy")
+async def model_accuracy(
+    days: int = Query(30, ge=1, le=365),
+    model_version: str = Query("", description="Filter by AI model version"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles("admin", "doctor")),
+):
+    """Overall and per-disease AI accuracy based on doctor feedback."""
+    from app.models.diagnosis_feedback import DiagnosisFeedback
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    base_filter = [DiagnosisFeedback.created_at >= since]
+    if model_version:
+        base_filter.append(DiagnosisFeedback.ai_model_version_snapshot == model_version)
+
+    total = (await db.execute(
+        select(func.count(DiagnosisFeedback.id)).where(*base_filter)
+    )).scalar() or 0
+    correct = (await db.execute(
+        select(func.count(DiagnosisFeedback.id)).where(
+            *base_filter, DiagnosisFeedback.ai_was_correct == True
+        )
+    )).scalar() or 0
+
+    disease_q = await db.execute(
+        select(
+            DiagnosisFeedback.ai_diagnosis_snapshot,
+            func.count(DiagnosisFeedback.id),
+            func.sum(case((DiagnosisFeedback.ai_was_correct == True, 1), else_=0)),
+        )
+        .where(*base_filter, DiagnosisFeedback.ai_diagnosis_snapshot.isnot(None))
+        .group_by(DiagnosisFeedback.ai_diagnosis_snapshot)
+        .order_by(func.count(DiagnosisFeedback.id).desc())
+        .limit(20)
+    )
+
+    return {
+        "period_days": days,
+        "model_version": model_version or "all",
+        "overall": {
+            "total_reviewed": total,
+            "correct": correct,
+            "accuracy": round(correct / total, 4) if total > 0 else 0,
+        },
+        "per_disease": [
+            {
+                "disease": row[0],
+                "total": row[1],
+                "correct": row[2],
+                "accuracy": round(row[2] / row[1], 4) if row[1] > 0 else 0,
+            }
+            for row in disease_q.all()
+        ],
+    }
+
+
+@router.get("/analytics/confidence-calibration")
+async def confidence_calibration(
+    days: int = Query(90, ge=1, le=365),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles("admin", "doctor")),
+):
+    """Compare AI confidence buckets vs actual correctness rate."""
+    from app.models.diagnosis_feedback import DiagnosisFeedback
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    q = await db.execute(
+        select(
+            case(
+                (DiagnosisFeedback.ai_confidence_snapshot < 0.5, "0-50%"),
+                (DiagnosisFeedback.ai_confidence_snapshot < 0.7, "50-70%"),
+                (DiagnosisFeedback.ai_confidence_snapshot < 0.85, "70-85%"),
+                else_="85-100%",
+            ).label("bucket"),
+            func.count(DiagnosisFeedback.id),
+            func.sum(case((DiagnosisFeedback.ai_was_correct == True, 1), else_=0)),
+        )
+        .where(
+            DiagnosisFeedback.created_at >= since,
+            DiagnosisFeedback.ai_confidence_snapshot.isnot(None),
+        )
+        .group_by("bucket")
+    )
+
+    return {
+        "period_days": days,
+        "buckets": [
+            {
+                "confidence_range": row[0],
+                "total": row[1],
+                "correct": row[2],
+                "actual_accuracy": round(row[2] / row[1], 4) if row[1] > 0 else 0,
+            }
+            for row in q.all()
+        ],
+    }
+
+
+@router.get("/analytics/model-performance-trend")
+async def model_performance_trend(
+    days: int = Query(90, ge=1, le=365),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles("admin", "doctor")),
+):
+    """Weekly accuracy trend, segmented by model version."""
+    from app.models.diagnosis_feedback import DiagnosisFeedback
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    q = await db.execute(
+        select(
+            func.date_trunc("week", DiagnosisFeedback.created_at).label("week"),
+            DiagnosisFeedback.ai_model_version_snapshot,
+            func.count(DiagnosisFeedback.id),
+            func.sum(case((DiagnosisFeedback.ai_was_correct == True, 1), else_=0)),
+        )
+        .where(DiagnosisFeedback.created_at >= since)
+        .group_by("week", DiagnosisFeedback.ai_model_version_snapshot)
+        .order_by("week")
+    )
+
+    return {
+        "period_days": days,
+        "trend": [
+            {
+                "week": str(row[0]),
+                "model_version": row[1],
+                "total": row[2],
+                "correct": row[3],
+                "accuracy": round(row[3] / row[2], 4) if row[2] > 0 else 0,
+            }
+            for row in q.all()
+        ],
+    }
+
+
+@router.get("/analytics/feedback-summary")
+async def feedback_summary(
+    days: int = Query(30, ge=1, le=365),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles("admin", "doctor")),
+):
+    """Aggregated feedback categories — what does the AI get wrong most."""
+    from app.models.diagnosis_feedback import DiagnosisFeedback
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    q = await db.execute(
+        select(
+            DiagnosisFeedback.feedback_category,
+            func.count(DiagnosisFeedback.id),
+        )
+        .where(DiagnosisFeedback.created_at >= since)
+        .group_by(DiagnosisFeedback.feedback_category)
+        .order_by(func.count(DiagnosisFeedback.id).desc())
+    )
+
+    severity_q = await db.execute(
+        select(func.count(DiagnosisFeedback.id))
+        .where(DiagnosisFeedback.created_at >= since, DiagnosisFeedback.severity_mismatch == True)
+    )
+
+    return {
+        "period_days": days,
+        "categories": [{"category": r[0], "count": r[1]} for r in q.all()],
+        "severity_mismatches": severity_q.scalar() or 0,
+    }

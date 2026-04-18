@@ -27,6 +27,9 @@ class Settings(BaseSettings):
 
     GCP_PROJECT_ID: Optional[str] = None
     GCS_BUCKET: Optional[str] = None
+    BQ_DATASET_ID: Optional[str] = None
+    BQ_FEEDBACK_TABLE: str = "diagnosis_feedback"
+    BQ_EXPORT_ENABLED: bool = False
     VERTEX_AI_LOCATION: str = "us-central1"
     MEDGEMMA_ENDPOINT_4B: Optional[str] = None
     MEDGEMMA_ENDPOINT_27B: Optional[str] = None

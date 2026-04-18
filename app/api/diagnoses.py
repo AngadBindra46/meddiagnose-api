@@ -15,6 +15,7 @@ from app.core.cache import cache_get, cache_set, cache_delete_pattern, make_cach
 from app.models.user import User
 from app.models.diagnosis import Diagnosis
 from app.schemas.diagnosis import DiagnosisCreate, DiagnosisReview, DiagnosisResponse, DiagnosisList
+from app.schemas.diagnosis_feedback import DiagnosisFeedbackCreate, DiagnosisFeedbackResponse
 from app.services.audit import log_audit
 from app.services.image_extraction import extract_images_from_file, images_to_base64_data_urls
 from app.services.diagnosis_context import build_prior_context, format_prior_context_for_prompt
@@ -533,3 +534,69 @@ async def review_diagnosis(
     await db.commit()
 
     return DiagnosisResponse.model_validate(diagnosis)
+
+
+@router.post("/{diagnosis_id}/feedback", response_model=DiagnosisFeedbackResponse, status_code=201)
+async def submit_feedback(
+    diagnosis_id: int,
+    body: DiagnosisFeedbackCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles("doctor", "reviewer", "admin")),
+):
+    """Submit structured feedback on an AI diagnosis."""
+    result = await db.execute(select(Diagnosis).where(Diagnosis.id == diagnosis_id))
+    diagnosis = result.scalar_one_or_none()
+    if not diagnosis:
+        raise HTTPException(status_code=404, detail="Diagnosis not found")
+
+    if diagnosis.status not in ("approved", "rejected", "overridden", "completed"):
+        raise HTTPException(status_code=400, detail="Feedback only allowed on reviewed/completed diagnoses")
+
+    valid_categories = {
+        "diagnosis_correct", "diagnosis_incorrect", "diagnosis_partially_correct",
+        "severity_mismatch", "medication_issue", "missed_condition",
+    }
+    if body.feedback_category not in valid_categories:
+        raise HTTPException(status_code=400, detail=f"Invalid category. Must be one of: {valid_categories}")
+
+    from app.models.diagnosis_feedback import DiagnosisFeedback
+
+    feedback = DiagnosisFeedback(
+        diagnosis_id=diagnosis_id,
+        reviewer_id=current_user.id,
+        ai_was_correct=body.ai_was_correct,
+        feedback_category=body.feedback_category,
+        confidence_appropriate=body.confidence_appropriate,
+        severity_mismatch=body.severity_mismatch,
+        missed_diagnoses=body.missed_diagnoses,
+        incorrect_medications=body.incorrect_medications,
+        feedback_notes=body.feedback_notes,
+        ai_diagnosis_snapshot=diagnosis.ai_diagnosis,
+        ai_confidence_snapshot=diagnosis.ai_confidence,
+        ai_severity_snapshot=diagnosis.ai_severity,
+        ai_model_version_snapshot=diagnosis.ai_model_version,
+        final_diagnosis_snapshot=diagnosis.final_diagnosis,
+    )
+    db.add(feedback)
+    await db.commit()
+    await db.refresh(feedback)
+
+    # Fire-and-forget BigQuery streaming insert
+    settings = get_settings()
+    if settings.BQ_EXPORT_ENABLED:
+        from app.services.bigquery_export import stream_feedback_to_bq, _feedback_to_bq_row
+        bq_row = _feedback_to_bq_row(feedback)
+        success = await stream_feedback_to_bq(bq_row)
+        if success:
+            feedback.synced_to_bq = True
+            await db.commit()
+
+    await log_audit(
+        db, action="feedback", resource_type="diagnosis", resource_id=str(diagnosis_id),
+        user_id=current_user.id, user_email=current_user.email, request=request,
+        changes={"ai_was_correct": body.ai_was_correct, "category": body.feedback_category},
+    )
+    await db.commit()
+
+    return DiagnosisFeedbackResponse.model_validate(feedback)
